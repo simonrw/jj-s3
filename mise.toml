@@ -1,0 +1,5 @@
+[tools]
+"github:localstack/lstk" = "latest"
+
+[env]
+AWS_PROFILE = "localstack"

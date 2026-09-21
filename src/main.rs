@@ -12,6 +12,7 @@ use jj_lib::{
     signing::Signer,
     workspace::{Workspace, WorkspaceInitError},
 };
+use tokio::runtime::Handle;
 
 use crate::backend::S3Backend;
 
@@ -25,7 +26,13 @@ fn create_store_factories() -> StoreFactories {
     let mut store_factories = StoreFactories::empty();
     store_factories.add_backend(
         "s3",
-        Box::new(|settings, store_path| Ok(Box::new(S3Backend::load(settings, store_path)?))),
+        Box::new(|settings, store_path| {
+            let handle = Handle::current();
+
+            Ok(Box::new(handle.block_on(async {
+                S3Backend::load(settings, store_path).await
+            })?))
+        }),
     );
     store_factories
 }
@@ -43,7 +50,13 @@ async fn run_custom_command(
             Workspace::init_with_backend(
                 &settings,
                 wc_path,
-                &|settings, store_path| Ok(Box::new(S3Backend::init(settings, store_path)?)),
+                &|settings, store_path| {
+                    let handle = Handle::current();
+
+                    Ok(Box::new(handle.block_on(async {
+                        S3Backend::init(settings, store_path).await
+                    })?))
+                },
                 Signer::from_settings(&settings).map_err(WorkspaceInitError::SignInit)?,
             )
             .await?;

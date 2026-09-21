@@ -1,5 +1,6 @@
 use std::{path::Path, pin::Pin, time::SystemTime};
 
+use aws_config::BehaviorVersion;
 use futures::{AsyncRead, stream::BoxStream};
 use jj_lib::{
     backend::{
@@ -11,22 +12,39 @@ use jj_lib::{
     settings::UserSettings,
 };
 
+static BUCKET_NAME: &'static str = "mybucket";
+
 #[derive(Debug)]
-pub(crate) struct S3Backend;
+pub(crate) struct S3Backend {
+    client: aws_sdk_s3::Client,
+}
 
 impl S3Backend {
-    pub(crate) fn init(
+    pub(crate) async fn init(
         settings: &UserSettings,
         store_path: &Path,
     ) -> Result<Self, BackendInitError> {
-        Ok(Self)
+        let config = aws_config::load_defaults(BehaviorVersion::latest()).await;
+        let client = aws_sdk_s3::Client::new(&config);
+
+        // only create the bucket on init
+        client
+            .create_bucket()
+            .bucket(BUCKET_NAME)
+            .send()
+            .await
+            .map_err(|e| BackendInitError(format!("error creating bucket: {e}").into()))?;
+
+        Ok(Self { client })
     }
 
-    pub(crate) fn load(
+    pub(crate) async fn load(
         settings: &UserSettings,
         store_path: &Path,
     ) -> Result<Self, BackendLoadError> {
-        Ok(Self)
+        let config = aws_config::load_defaults(BehaviorVersion::latest()).await;
+        let client = aws_sdk_s3::Client::new(&config);
+        Ok(Self { client })
     }
 }
 
