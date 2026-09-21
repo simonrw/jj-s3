@@ -1,4 +1,6 @@
 mod backend;
+mod op_heads_store;
+mod op_store;
 
 use jj_cli::{
     cli_util::{CliRunner, CommandHelper},
