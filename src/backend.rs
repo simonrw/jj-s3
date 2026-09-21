@@ -1,22 +1,32 @@
 use std::{path::Path, pin::Pin, time::SystemTime};
 
 use aws_config::BehaviorVersion;
+use aws_sdk_s3::operation::get_object::GetObjectError;
 use futures::{AsyncRead, stream::BoxStream};
 use jj_lib::{
     backend::{
-        Backend, BackendInitError, BackendLoadError, BackendResult, ChangeId, Commit, CommitId,
-        CopyHistory, CopyId, CopyRecord, FileId, RelatedCopy, SigningFn, SymlinkId, Tree, TreeId,
+        Backend, BackendError, BackendInitError, BackendLoadError, BackendResult, ChangeId, Commit,
+        CommitId, CopyHistory, CopyId, CopyRecord, FileId, RelatedCopy, Signature, SigningFn,
+        SymlinkId, Timestamp, Tree, TreeId, make_root_commit,
     },
+    content_hash::ContentHash,
     index::Index,
+    merge::Merge,
     repo_path::{RepoPath, RepoPathBuf},
     settings::UserSettings,
 };
+use sha1_checked::{Digest, Sha1};
 
 static BUCKET_NAME: &'static str = "mybucket";
 
 #[derive(Debug)]
 pub(crate) struct S3Backend {
     client: aws_sdk_s3::Client,
+
+    // defaults for ids
+    root_commit_id: CommitId,
+    root_change_id: ChangeId,
+    empty_tree_id: TreeId,
 }
 
 impl S3Backend {
@@ -35,7 +45,24 @@ impl S3Backend {
             .await
             .map_err(|e| BackendInitError(format!("error creating bucket: {e}").into()))?;
 
-        Ok(Self { client })
+        let root_tree_id = TreeId::from_hex("00000000");
+        let root_change_id = ChangeId::from_hex("aaaaaaaa");
+
+        // create the root commit
+        let root_commit = make_root_commit(root_change_id.clone(), root_tree_id.clone());
+
+        let this = Self {
+            client,
+            root_commit_id: CommitId::from_hex("00000000000000000000000000000000"),
+            root_change_id: root_change_id,
+            empty_tree_id: root_tree_id,
+        };
+
+        this.write_root_commit()
+            .await
+            .map_err(|e| BackendInitError(Box::new(e)))?;
+
+        Ok(this)
     }
 
     pub(crate) async fn load(
@@ -44,7 +71,36 @@ impl S3Backend {
     ) -> Result<Self, BackendLoadError> {
         let config = aws_config::load_defaults(BehaviorVersion::latest()).await;
         let client = aws_sdk_s3::Client::new(&config);
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            root_commit_id: CommitId::from_hex("00000000000000000000000000000000"),
+            root_change_id: ChangeId::from_hex("aaaaaaaa"),
+            empty_tree_id: TreeId::from_hex("00000000"),
+        })
+    }
+
+    async fn write_root_commit(&self) -> Result<(), BackendError> {
+        let root_commit = make_root_commit(self.root_change_id.clone(), self.empty_tree_id.clone());
+        let key = format!("objects/commits/{}", &self.root_commit_id);
+
+        let body = serde_json::to_vec(&root_commit).expect("serialize root commit");
+
+        self.client
+            .put_object()
+            .bucket(BUCKET_NAME)
+            .key(&key)
+            .body(body.into())
+            .send()
+            .await
+            .map_err(|e| {
+                // TODO: handle proper errors
+                BackendError::WriteObject {
+                    object_type: "commit",
+                    source: Box::new(e),
+                }
+            })?;
+
+        Ok(())
     }
 }
 
@@ -63,15 +119,15 @@ impl Backend for S3Backend {
     }
 
     fn root_commit_id(&self) -> &CommitId {
-        todo!()
+        &self.root_commit_id
     }
 
     fn root_change_id(&self) -> &ChangeId {
-        todo!()
+        &self.root_change_id
     }
 
     fn empty_tree_id(&self) -> &TreeId {
-        todo!()
+        &self.empty_tree_id
     }
 
     fn concurrency(&self) -> usize {
@@ -123,6 +179,37 @@ impl Backend for S3Backend {
     }
 
     async fn read_commit(&self, id: &CommitId) -> BackendResult<Commit> {
+        let key = format!("objects/commits/{id}");
+
+        let body = self
+            .client
+            .get_object()
+            .bucket(BUCKET_NAME)
+            .key(&key)
+            .send()
+            .await
+            .map_err(|e| match e.as_service_error() {
+                Some(GetObjectError::NoSuchKey(..)) => BackendError::ObjectNotFound {
+                    object_type: "commit".to_string(),
+                    hash: id.to_string(),
+                    source: Box::new(e),
+                },
+                _ => BackendError::ReadObject {
+                    object_type: "commit".to_string(),
+                    hash: id.to_string(),
+                    source: Box::new(e),
+                },
+            })?;
+
+        let commit_bytes = body
+            .body
+            .collect()
+            .await
+            .expect("reading commit body")
+            .to_vec();
+
+        // let commit: Commit = serde_json::from_slice(&commit_bytes).expect("parsing commit");
+
         todo!()
     }
 
@@ -131,6 +218,10 @@ impl Backend for S3Backend {
         contents: Commit,
         sign_with: Option<&mut SigningFn>,
     ) -> BackendResult<(CommitId, Commit)> {
+        let mut hasher = Sha1::new();
+        contents.hash(&mut hasher);
+        let commit_id = hasher.finalize();
+
         todo!()
     }
 

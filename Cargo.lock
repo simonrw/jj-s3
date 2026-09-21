@@ -3304,6 +3304,8 @@ dependencies = [
  "futures 0.3.34",
  "jj-cli",
  "jj-lib",
+ "serde_json",
+ "sha1-checked",
  "tokio",
 ]
 
