@@ -66,6 +66,20 @@ async fn run_custom_command(
 }
 
 fn main() -> std::process::ExitCode {
+    // jj drives futures with Pollster, which provides no I/O or timer reactor.
+    // Keep Tokio's worker threads running for AWS requests throughout the CLI.
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("Failed to start Tokio runtime: {error}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    let _guard = runtime.enter();
+
     CliRunner::init()
         .add_store_factories(create_store_factories())
         .add_subcommand(run_custom_command)
