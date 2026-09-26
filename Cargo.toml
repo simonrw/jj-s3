@@ -1,16 +1,4 @@
-[package]
-name = "jj-s3"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+resolver = "2"
 
-[dependencies]
-async-trait = "0.1.92"
-aws-config = "1.12.0"
-aws-sdk-s3 = "1.148.0"
-clap = { version = "4.6.7", features = ["derive"] }
-futures = "0.3.34"
-jj-cli = "0.45.1"
-jj-lib = "0.45.1"
-serde_json = "1.0.151"
-sha1-checked = "0.10.0"
-tokio = { version = "1.53.1", features = ["full"] }
+members = ["crates/*"]

@@ -1,7 +1,11 @@
-use std::{path::Path, pin::Pin, time::SystemTime};
+use std::{fs, path::Path, pin::Pin, time::SystemTime};
 
 use aws_config::BehaviorVersion;
-use aws_sdk_s3::operation::get_object::GetObjectError;
+use aws_sdk_s3::{
+    config::Region,
+    operation::get_object::GetObjectError,
+    types::{BucketLocationConstraint, CreateBucketConfiguration},
+};
 use futures::{AsyncRead, stream::BoxStream};
 use jj_lib::{
     backend::{
@@ -17,11 +21,32 @@ use jj_lib::{
 };
 use sha1_checked::{Digest, Sha1};
 
-static BUCKET_NAME: &'static str = "mybucket";
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct RemoteLocator {
+    pub(crate) bucket_name: String,
+    pub(crate) prefix: String,
+}
+
+impl RemoteLocator {
+    pub(crate) fn new(bucket_name: impl Into<String>, prefix: impl Into<String>) -> Self {
+        Self {
+            bucket_name: bucket_name.into(),
+            prefix: prefix.into(),
+        }
+    }
+
+    pub(crate) fn load(store_path: &Path) -> Result<Self, BackendLoadError> {
+        let bytes =
+            fs::read(store_path.join("s3.json")).map_err(|error| BackendLoadError(error.into()))?;
+        serde_json::from_slice(&bytes).map_err(|error| BackendLoadError(error.into()))
+    }
+}
 
 #[derive(Debug)]
 pub(crate) struct S3Backend {
     client: aws_sdk_s3::Client,
+    bucket_name: String,
+    prefix: String,
 
     // defaults for ids
     root_commit_id: CommitId,
@@ -31,19 +56,17 @@ pub(crate) struct S3Backend {
 
 impl S3Backend {
     pub(crate) async fn init(
-        settings: &UserSettings,
+        backend_config: RemoteLocator,
+        _settings: &UserSettings,
         store_path: &Path,
     ) -> Result<Self, BackendInitError> {
-        let config = aws_config::load_defaults(BehaviorVersion::latest()).await;
+        let config = aws_config::defaults(BehaviorVersion::latest()).load().await;
         let client = aws_sdk_s3::Client::new(&config);
 
-        // only create the bucket on init
-        client
-            .create_bucket()
-            .bucket(BUCKET_NAME)
-            .send()
-            .await
-            .map_err(|e| BackendInitError(format!("error creating bucket: {e}").into()))?;
+        let bytes =
+            serde_json::to_vec(&backend_config).map_err(|error| BackendInitError(error.into()))?;
+        fs::write(store_path.join("s3.json"), bytes)
+            .map_err(|error| BackendInitError(error.into()))?;
 
         let root_tree_id = TreeId::from_hex("00000000");
         let root_change_id = ChangeId::from_hex("aaaaaaaa");
@@ -53,6 +76,8 @@ impl S3Backend {
 
         let this = Self {
             client,
+            bucket_name: backend_config.bucket_name,
+            prefix: backend_config.prefix,
             root_commit_id: CommitId::from_hex("00000000000000000000000000000000"),
             root_change_id: root_change_id,
             empty_tree_id: root_tree_id,
@@ -66,13 +91,16 @@ impl S3Backend {
     }
 
     pub(crate) async fn load(
-        settings: &UserSettings,
-        store_path: &Path,
+        backend_config: RemoteLocator,
+        _settings: &UserSettings,
+        _store_path: &Path,
     ) -> Result<Self, BackendLoadError> {
-        let config = aws_config::load_defaults(BehaviorVersion::latest()).await;
+        let config = aws_config::defaults(BehaviorVersion::latest()).load().await;
         let client = aws_sdk_s3::Client::new(&config);
         Ok(Self {
             client,
+            bucket_name: backend_config.bucket_name,
+            prefix: backend_config.prefix,
             root_commit_id: CommitId::from_hex("00000000000000000000000000000000"),
             root_change_id: ChangeId::from_hex("aaaaaaaa"),
             empty_tree_id: TreeId::from_hex("00000000"),
@@ -81,13 +109,13 @@ impl S3Backend {
 
     async fn write_root_commit(&self) -> Result<(), BackendError> {
         let root_commit = make_root_commit(self.root_change_id.clone(), self.empty_tree_id.clone());
-        let key = format!("objects/commits/{}", &self.root_commit_id);
+        let key = self.key_for_commit(&self.root_commit_id);
 
         let body = serde_json::to_vec(&root_commit).expect("serialize root commit");
 
         self.client
             .put_object()
-            .bucket(BUCKET_NAME)
+            .bucket(&self.bucket_name)
             .key(&key)
             .body(body.into())
             .send()
@@ -101,6 +129,10 @@ impl S3Backend {
             })?;
 
         Ok(())
+    }
+
+    fn key_for_commit(&self, commit_id: &CommitId) -> String {
+        format!("{}/objects/commits/{commit_id}", &self.prefix)
     }
 }
 
@@ -179,12 +211,12 @@ impl Backend for S3Backend {
     }
 
     async fn read_commit(&self, id: &CommitId) -> BackendResult<Commit> {
-        let key = format!("objects/commits/{id}");
+        let key = self.key_for_commit(id);
 
         let body = self
             .client
             .get_object()
-            .bucket(BUCKET_NAME)
+            .bucket(&self.bucket_name)
             .key(&key)
             .send()
             .await
